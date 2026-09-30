@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from vllm.logger import init_logger
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from vllm_omni.config.composable_parallel.strategy_loader import load_strategy_specs
 from vllm_omni.config.config_factory import StageConfigFactory, with_trust_remote_code_override
@@ -50,13 +51,7 @@ def _filter_dict_like_object(obj: dict | Any) -> dict:
     result = {}
     filtered_keys = []
     for key, value in obj.items():
-        # Preserve class objects as import paths for consumers such as
-        # custom_pipeline_args.pipeline_class.
-        if isinstance(value, type):
-            module = getattr(value, "__module__", None)
-            qualname = getattr(value, "__qualname__", getattr(value, "__name__", None))
-            result[key] = f"{module}.{qualname}" if module and qualname and module != "builtins" else qualname
-        elif callable(value):
+        if callable(value) and not isinstance(value, type):
             filtered_keys.append(str(key))
         else:
             result[key] = _convert_dataclasses_to_dict(value)
@@ -98,7 +93,10 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     if isinstance(obj, type):
         module = getattr(obj, "__module__", None)
         qualname = getattr(obj, "__qualname__", getattr(obj, "__name__", None))
-        return f"{module}.{qualname}" if module and qualname and module != "builtins" else qualname
+        # vLLM's logits processor loader requires module:qualname; other
+        # class-valued options (e.g. pipeline_class) use dotted import paths.
+        separator = ":" if issubclass(obj, LogitsProcessor) else "."
+        return f"{module}{separator}{qualname}" if module and qualname and module != "builtins" else qualname
     if callable(obj):
         logger.warning(
             "Cannot convert callable %r to an OmegaConf-compatible value.",
@@ -108,7 +106,7 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         converted = []
         for item in obj:
-            if callable(item):
+            if callable(item) and not isinstance(item, type):
                 logger.warning(
                     "Filtered callable %r from an OmegaConf-compatible sequence.",
                     item,
