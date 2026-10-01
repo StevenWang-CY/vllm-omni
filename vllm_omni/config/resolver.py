@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.v1.sample.logits_processor import LogitsProcessor
 
 from vllm_omni.config.composable_parallel.strategy_loader import load_strategy_specs
 from vllm_omni.config.config_factory import StageConfigFactory, with_trust_remote_code_override
@@ -51,7 +50,7 @@ def _filter_dict_like_object(obj: dict | Any) -> dict:
     result = {}
     filtered_keys = []
     for key, value in obj.items():
-        if callable(value) and not isinstance(value, type):
+        if callable(value):
             filtered_keys.append(str(key))
         else:
             result[key] = _convert_dataclasses_to_dict(value)
@@ -65,7 +64,11 @@ def _filter_dict_like_object(obj: dict | Any) -> dict:
 
 
 def _convert_dataclasses_to_dict(obj: Any) -> Any:
-    """Recursively convert caller values to OmegaConf-compatible types."""
+    """Recursively convert caller values to OmegaConf-compatible types.
+
+    Classes are callables too and may not have importable names. Callers
+    should supply explicit import-path strings instead of class objects.
+    """
     # Check by class name before dict to cover both collections.Counter and
     # vllm.utils.Counter without importing either implementation.
     if hasattr(obj, "__class__") and obj.__class__.__name__ == "Counter":
@@ -74,7 +77,7 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
         except (TypeError, ValueError):
             return {}
     if isinstance(obj, set):
-        return list(obj)
+        return _convert_dataclasses_to_dict(list(obj))
     if is_dataclass(obj) and not isinstance(obj, type):
         result = {}
         for config_field in fields(obj):
@@ -90,13 +93,6 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
         return result
     if isinstance(obj, dict):
         return _filter_dict_like_object(obj)
-    if isinstance(obj, type):
-        module = getattr(obj, "__module__", None)
-        qualname = getattr(obj, "__qualname__", getattr(obj, "__name__", None))
-        # vLLM's logits processor loader requires module:qualname; other
-        # class-valued options (e.g. pipeline_class) use dotted import paths.
-        separator = ":" if issubclass(obj, LogitsProcessor) else "."
-        return f"{module}{separator}{qualname}" if module and qualname and module != "builtins" else qualname
     if callable(obj):
         logger.warning(
             "Cannot convert callable %r to an OmegaConf-compatible value.",
@@ -106,7 +102,7 @@ def _convert_dataclasses_to_dict(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         converted = []
         for item in obj:
-            if callable(item) and not isinstance(item, type):
+            if callable(item):
                 logger.warning(
                     "Filtered callable %r from an OmegaConf-compatible sequence.",
                     item,
